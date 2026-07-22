@@ -463,24 +463,33 @@ setTimeout(()=>{renderMembers();updateMemberAccess();renderExpenses()},0);
   try { currentUser = { id: 'shared-wallet' }; } catch (_) {}
   try { ownerMode = false; } catch (_) {}
 
+  const STORAGE_KEY = 'busan_shared_wallet_v1';
+
   async function getState() {
-    const response = await fetch(API, { cache: 'no-store' });
-    if (!response.ok) throw new Error('read');
-    return response.json();
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return { expenses: [], members: [], rate: Number($q('#rate')?.value) || 43, updated_at: null };
+      const data = JSON.parse(raw);
+      return {
+        expenses: Array.isArray(data.expenses) ? data.expenses : [],
+        members: Array.isArray(data.members) ? data.members : [],
+        rate: Number(data.rate) || 43,
+        updated_at: data.updated_at || null
+      };
+    } catch (_) {
+      return { expenses: [], members: [], rate: 43, updated_at: null };
+    }
   }
 
   async function putState() {
-    const response = await fetch(API, {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        expenses: Array.isArray(expenses) ? expenses : [],
-        members: Array.isArray(members) ? members : [],
-        rate: Number($q('#rate')?.value) || 43
-      })
-    });
-    if (!response.ok) throw new Error('save');
-    return response.json();
+    const data = {
+      expenses: Array.isArray(expenses) ? expenses : [],
+      members: Array.isArray(members) ? members : [],
+      rate: Number($q('#rate')?.value) || 43,
+      updated_at: new Date().toISOString()
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    return data;
   }
 
   function selectedMember() {
@@ -570,7 +579,7 @@ setTimeout(()=>{renderMembers();updateMemberAccess();renderExpenses()},0);
       if (sync) sync.textContent = '已自動儲存 ' + new Date(result.updated_at || Date.now()).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
       if (showMessage) toast('記帳完成');
     } catch (_) {
-      toast('資料暫時無法儲存，請確認網站已正確上線');
+      toast('資料無法儲存，請確認瀏覽器沒有開啟無痕模式');
     }
   }
 
@@ -597,10 +606,10 @@ setTimeout(()=>{renderMembers();updateMemberAccess();renderExpenses()},0);
       memberUnlocked = !selectedMember()?.pin_hash;
       renderMembers();
       const sync = $q('#syncTime');
-      if (sync) sync.textContent = data.updated_at ? '共同記帳已同步' : '共同記帳已連線';
+      if (sync) sync.textContent = data.updated_at ? '已從本機儲存讀取' : '資料會自動保存在這台裝置';
     } catch (_) {
       const sync = $q('#syncTime');
-      if (sync) sync.textContent = '共同記帳暫時無法連線';
+      if (sync) sync.textContent = '本機儲存讀取失敗';
     } finally {
       loading = false;
     }
@@ -701,7 +710,7 @@ setTimeout(()=>{renderMembers();updateMemberAccess();renderExpenses()},0);
 
   $q('#rate')?.addEventListener('change', () => saveShared(false));
   pullCloud();
-  setInterval(() => { if (!document.hidden) pullCloud(); }, 10000);
+  window.addEventListener('storage', () => { if (!document.hidden) pullCloud(); });
 })();
 </script>
 
