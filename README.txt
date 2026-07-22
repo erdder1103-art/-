@@ -1,16 +1,7 @@
-釜山旅行助手－共同記帳修正版
+GitHub Pages 上傳方式：
+1. 將 index.html 與 .nojekyll 放在儲存庫最外層。
+2. Settings > Pages > Deploy from a branch。
+3. Branch 選 main，資料夾選 /(root)。
+4. 儲存後等待 1-3 分鐘。
 
-使用者畫面：
-- 沒有管理者模式
-- 沒有雲端同步按鈕
-- 沒有 Email、登入、房間碼或 Supabase 設定
-- 大家使用同一個網址
-- 自己新增名字或刪除名字
-- 密碼可設定，也可以留空
-- 所有手機共用同一份記帳資料
-
-Cloudflare Pages 部署一次：
-1. 上傳本資料夾到 Cloudflare Pages。
-2. 建立 D1 資料庫並執行 schema.sql。
-3. Pages 設定中新增 D1 Binding，變數名稱必須為 DB。
-4. 重新部署。
+注意：GitHub Pages 只能執行靜態網站，/api/state 伺服器同步功能不會在 GitHub Pages 上運作。
