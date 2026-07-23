@@ -1,11 +1,17 @@
 const express = require('express');
 const fs = require('fs/promises');
 const path = require('path');
+const crypto = require('crypto');
 
 const app = express();
 const port = process.env.PORT || 3000;
-const dataDir = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data');
+
+// Railway Volume 掛載後會自動提供 RAILWAY_VOLUME_MOUNT_PATH。
+// Railway 正式環境絕不再把資料寫進程式目錄，避免每次部署被清空。
+const isRailway = Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID);
+const dataDir = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || (isRailway ? '/data' : path.join(__dirname, 'data'));
 const stateFile = path.join(dataDir, 'state.json');
+const backupFile = path.join(dataDir, 'state.backup.json');
 const emptyState = { expenses: [], members: [], rate: 43, updated_at: null };
 let writeQueue = Promise.resolve();
 
@@ -21,46 +27,55 @@ async function ensureDataFile() {
   }
 }
 
+function normalizeState(data) {
+  return {
+    expenses: Array.isArray(data?.expenses) ? data.expenses.slice(0, 10000) : [],
+    members: Array.isArray(data?.members) ? data.members.slice(0, 100) : [],
+    rate: Number(data?.rate) || 43,
+    updated_at: data?.updated_at || null
+  };
+}
+
 async function readState() {
   await ensureDataFile();
   try {
     const raw = await fs.readFile(stateFile, 'utf8');
-    const data = JSON.parse(raw);
-    return {
-      expenses: Array.isArray(data.expenses) ? data.expenses : [],
-      members: Array.isArray(data.members) ? data.members : [],
-      rate: Number(data.rate) || 43,
-      updated_at: data.updated_at || null
-    };
-  } catch {
-    return { ...emptyState };
+    return normalizeState(JSON.parse(raw));
+  } catch (error) {
+    console.error('Primary state read failed:', error);
+    try {
+      const raw = await fs.readFile(backupFile, 'utf8');
+      return normalizeState(JSON.parse(raw));
+    } catch {
+      return { ...emptyState };
+    }
   }
 }
 
 async function writeState(data) {
-  const safe = {
-    expenses: Array.isArray(data.expenses) ? data.expenses.slice(0, 10000) : [],
-    members: Array.isArray(data.members) ? data.members.slice(0, 100) : [],
-    rate: Number(data.rate) || 43,
-    updated_at: new Date().toISOString()
-  };
+  const safe = normalizeState({ ...data, updated_at: new Date().toISOString() });
+  safe.updated_at = new Date().toISOString();
+
   writeQueue = writeQueue.then(async () => {
     await ensureDataFile();
-    const tempFile = `${stateFile}.tmp`;
+    try {
+      await fs.copyFile(stateFile, backupFile);
+    } catch {}
+
+    const tempFile = path.join(dataDir, `state-${process.pid}.tmp`);
     await fs.writeFile(tempFile, JSON.stringify(safe, null, 2), 'utf8');
     await fs.rename(tempFile, stateFile);
   });
+
   await writeQueue;
   return safe;
 }
-
 
 function normalizePin(value) {
   return String(value ?? '').trim();
 }
 
-async function sha256(value) {
-  const crypto = require('crypto');
+function sha256(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex');
 }
 
@@ -69,12 +84,15 @@ app.post('/api/verify-pin', async (req, res) => {
     const memberId = String(req.body?.member_id || '');
     const pin = normalizePin(req.body?.pin);
     if (!memberId || !pin) return res.status(400).json({ ok: false });
+
     const state = await readState();
-    const member = state.members.find(m => m.id === memberId);
+    const member = state.members.find((item) => item.id === memberId);
     if (!member) return res.status(404).json({ ok: false });
+
     const adminPin = normalizePin(process.env.ADMIN_PIN || '0723');
-    const memberOk = member.pin_hash && (await sha256(pin)) === member.pin_hash;
+    const memberOk = Boolean(member.pin_hash) && sha256(pin) === member.pin_hash;
     const adminOk = pin === adminPin;
+
     if (!memberOk && !adminOk) return res.status(401).json({ ok: false });
     res.json({ ok: true, mode: adminOk ? 'admin' : 'member' });
   } catch (error) {
@@ -83,16 +101,32 @@ app.post('/api/verify-pin', async (req, res) => {
   }
 });
 
-app.get('/api/health', (_req, res) => res.json({ ok: true }));
+app.get('/api/health', async (_req, res) => {
+  try {
+    const state = await readState();
+    res.json({
+      ok: true,
+      persistent_storage: Boolean(process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || isRailway),
+      storage_path: dataDir,
+      members: state.members.length,
+      expenses: state.expenses.length,
+      updated_at: state.updated_at
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
 app.get('/api/state', async (_req, res) => {
   try {
-    res.set('Cache-Control', 'no-store');
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.json(await readState());
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'read_failed' });
   }
 });
+
 app.put('/api/state', async (req, res) => {
   try {
     res.json(await writeState(req.body || {}));
@@ -105,5 +139,10 @@ app.put('/api/state', async (req, res) => {
 app.use((_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 ensureDataFile().then(() => {
+  console.log(`Persistent storage path: ${dataDir}`);
+  console.log(`State file: ${stateFile}`);
   app.listen(port, '0.0.0.0', () => console.log(`Busan wallet running on port ${port}`));
+}).catch((error) => {
+  console.error('Failed to initialize persistent storage:', error);
+  process.exit(1);
 });

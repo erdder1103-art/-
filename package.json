@@ -1,8 +1,9 @@
 {
-  "name": "busan-trip-wallet",
-  "version": "1.0.0",
+  "name": "busan-trip-wallet-v7",
+  "version": "7.0.0",
   "private": true,
-  "type": "commonjs",
+  "description": "Busan family travel wallet with Railway shared storage",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
@@ -10,6 +11,6 @@
     "node": ">=20"
   },
   "dependencies": {
-    "express": "^5.1.0"
+    "express": "^4.21.2"
   }
 }
