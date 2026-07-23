@@ -47,3 +47,6 @@ Busan Trip Wallet V8 - Railway PostgreSQL 版
 - 不要刪除 Railway PostgreSQL 服務，否則資料庫也會被刪除。
 - ADMIN_PIN 可以在 Railway Variables 更換，不必修改 HTML。
 - 首次啟動會自動建立資料表，不需要執行 SQL。
+
+
+V8.1：附近推薦新增美食與景點分類、親子/推車/雨天標籤、NAVER 熱門搜尋入口。
