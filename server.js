@@ -1,75 +1,42 @@
+'use strict';
+
 const express = require('express');
-const fs = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
+const { Pool } = require('pg');
 
 const app = express();
-const port = process.env.PORT || 3000;
+const port = Number(process.env.PORT || 3000);
+const databaseUrl = process.env.DATABASE_URL;
 
-// Railway Volume 掛載後會自動提供 RAILWAY_VOLUME_MOUNT_PATH。
-// Railway 正式環境絕不再把資料寫進程式目錄，避免每次部署被清空。
-const isRailway = Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID);
-const dataDir = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || (isRailway ? '/data' : path.join(__dirname, 'data'));
-const stateFile = path.join(dataDir, 'state.json');
-const backupFile = path.join(dataDir, 'state.backup.json');
-const emptyState = { expenses: [], members: [], rate: 43, updated_at: null };
-let writeQueue = Promise.resolve();
-
-app.use(express.json({ limit: '2mb' }));
-app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }));
-
-async function ensureDataFile() {
-  await fs.mkdir(dataDir, { recursive: true });
-  try {
-    await fs.access(stateFile);
-  } catch {
-    await fs.writeFile(stateFile, JSON.stringify(emptyState, null, 2), 'utf8');
-  }
+if (!databaseUrl) {
+  console.error('DATABASE_URL is missing. Add a Railway PostgreSQL database to this project.');
+  process.exit(1);
 }
 
-function normalizeState(data) {
-  return {
-    expenses: Array.isArray(data?.expenses) ? data.expenses.slice(0, 10000) : [],
-    members: Array.isArray(data?.members) ? data.members.slice(0, 100) : [],
-    rate: Number(data?.rate) || 43,
-    updated_at: data?.updated_at || null
-  };
-}
+const pool = new Pool({
+  connectionString: databaseUrl,
+  ssl: databaseUrl.includes('localhost') ? false : { rejectUnauthorized: false },
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000
+});
 
-async function readState() {
-  await ensureDataFile();
-  try {
-    const raw = await fs.readFile(stateFile, 'utf8');
-    return normalizeState(JSON.parse(raw));
-  } catch (error) {
-    console.error('Primary state read failed:', error);
-    try {
-      const raw = await fs.readFile(backupFile, 'utf8');
-      return normalizeState(JSON.parse(raw));
-    } catch {
-      return { ...emptyState };
-    }
-  }
-}
+const EMPTY_STATE = {
+  expenses: [],
+  members: [],
+  rate: 43,
+  updated_at: null,
+  version: 0
+};
 
-async function writeState(data) {
-  const safe = normalizeState({ ...data, updated_at: new Date().toISOString() });
-  safe.updated_at = new Date().toISOString();
-
-  writeQueue = writeQueue.then(async () => {
-    await ensureDataFile();
-    try {
-      await fs.copyFile(stateFile, backupFile);
-    } catch {}
-
-    const tempFile = path.join(dataDir, `state-${process.pid}.tmp`);
-    await fs.writeFile(tempFile, JSON.stringify(safe, null, 2), 'utf8');
-    await fs.rename(tempFile, stateFile);
-  });
-
-  await writeQueue;
-  return safe;
-}
+app.disable('x-powered-by');
+app.use(express.json({ limit: '3mb' }));
+app.use(express.static(path.join(__dirname, 'public'), {
+  extensions: ['html'],
+  etag: true,
+  maxAge: '5m'
+}));
 
 function normalizePin(value) {
   return String(value ?? '').trim();
@@ -79,41 +46,106 @@ function sha256(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex');
 }
 
-app.post('/api/verify-pin', async (req, res) => {
+function normalizeState(input) {
+  const members = Array.isArray(input?.members) ? input.members.slice(0, 200) : [];
+  const memberIds = new Set(members.map((item) => String(item?.id || '')).filter(Boolean));
+  const expenses = Array.isArray(input?.expenses)
+    ? input.expenses
+        .filter((item) => item && memberIds.has(String(item.member_id || '')))
+        .slice(0, 50000)
+    : [];
+
+  return {
+    members,
+    expenses,
+    rate: Number(input?.rate) > 0 ? Number(input.rate) : 43
+  };
+}
+
+async function initializeDatabase() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS app_state (
+      id SMALLINT PRIMARY KEY CHECK (id = 1),
+      payload JSONB NOT NULL DEFAULT '{"expenses":[],"members":[],"rate":43}'::jsonb,
+      version BIGINT NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await pool.query(`
+    INSERT INTO app_state (id, payload)
+    VALUES (1, $1::jsonb)
+    ON CONFLICT (id) DO NOTHING
+  `, [JSON.stringify({ expenses: [], members: [], rate: 43 })]);
+}
+
+async function readState(client = pool) {
+  const result = await client.query(
+    'SELECT payload, version, updated_at FROM app_state WHERE id = 1'
+  );
+
+  if (!result.rows.length) return { ...EMPTY_STATE };
+  const row = result.rows[0];
+  const state = normalizeState(row.payload || {});
+  return {
+    ...state,
+    version: Number(row.version || 0),
+    updated_at: row.updated_at ? new Date(row.updated_at).toISOString() : null
+  };
+}
+
+async function writeState(input) {
+  const safe = normalizeState(input || {});
+  const client = await pool.connect();
+
   try {
-    const memberId = String(req.body?.member_id || '');
-    const pin = normalizePin(req.body?.pin);
-    if (!memberId || !pin) return res.status(400).json({ ok: false });
+    await client.query('BEGIN');
+    const current = await client.query(
+      'SELECT version FROM app_state WHERE id = 1 FOR UPDATE'
+    );
+    const nextVersion = Number(current.rows[0]?.version || 0) + 1;
 
-    const state = await readState();
-    const member = state.members.find((item) => item.id === memberId);
-    if (!member) return res.status(404).json({ ok: false });
+    const result = await client.query(`
+      UPDATE app_state
+      SET payload = $1::jsonb,
+          version = $2,
+          updated_at = NOW()
+      WHERE id = 1
+      RETURNING payload, version, updated_at
+    `, [JSON.stringify(safe), nextVersion]);
 
-    const adminPin = normalizePin(process.env.ADMIN_PIN || '0723');
-    const memberOk = Boolean(member.pin_hash) && sha256(pin) === member.pin_hash;
-    const adminOk = pin === adminPin;
-
-    if (!memberOk && !adminOk) return res.status(401).json({ ok: false });
-    res.json({ ok: true, mode: adminOk ? 'admin' : 'member' });
+    await client.query('COMMIT');
+    const row = result.rows[0];
+    return {
+      ...normalizeState(row.payload),
+      version: Number(row.version),
+      updated_at: new Date(row.updated_at).toISOString()
+    };
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ ok: false });
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
-});
+}
 
 app.get('/api/health', async (_req, res) => {
   try {
     const state = await readState();
+    res.set('Cache-Control', 'no-store');
     res.json({
       ok: true,
-      persistent_storage: Boolean(process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || isRailway),
-      storage_path: dataDir,
+      version: '8.0.0',
+      storage: 'postgresql',
+      persistent_storage: true,
       members: state.members.length,
       expenses: state.expenses.length,
+      state_version: state.version,
       updated_at: state.updated_at
     });
   } catch (error) {
-    res.status(500).json({ ok: false, error: error.message });
+    console.error('Health check failed:', error);
+    res.status(500).json({ ok: false, error: 'database_unavailable' });
   }
 });
 
@@ -122,27 +154,64 @@ app.get('/api/state', async (_req, res) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.json(await readState());
   } catch (error) {
-    console.error(error);
+    console.error('Read state failed:', error);
     res.status(500).json({ error: 'read_failed' });
   }
 });
 
 app.put('/api/state', async (req, res) => {
   try {
+    res.set('Cache-Control', 'no-store');
     res.json(await writeState(req.body || {}));
   } catch (error) {
-    console.error(error);
+    console.error('Write state failed:', error);
     res.status(500).json({ error: 'write_failed' });
   }
 });
 
-app.use((_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+app.post('/api/verify-pin', async (req, res) => {
+  try {
+    const memberId = String(req.body?.member_id || '').trim();
+    const pin = normalizePin(req.body?.pin);
+    if (!memberId || !pin) return res.status(400).json({ ok: false });
 
-ensureDataFile().then(() => {
-  console.log(`Persistent storage path: ${dataDir}`);
-  console.log(`State file: ${stateFile}`);
-  app.listen(port, '0.0.0.0', () => console.log(`Busan wallet running on port ${port}`));
-}).catch((error) => {
-  console.error('Failed to initialize persistent storage:', error);
-  process.exit(1);
+    const state = await readState();
+    const member = state.members.find((item) => String(item.id) === memberId);
+    if (!member) return res.status(404).json({ ok: false });
+
+    const adminPin = normalizePin(process.env.ADMIN_PIN || '0723');
+    const memberOk = Boolean(member.pin_hash) && sha256(pin) === member.pin_hash;
+    const adminOk = pin === adminPin;
+
+    if (!memberOk && !adminOk) return res.status(401).json({ ok: false });
+    return res.json({ ok: true, mode: adminOk ? 'admin' : 'member' });
+  } catch (error) {
+    console.error('PIN verification failed:', error);
+    return res.status(500).json({ ok: false });
+  }
 });
+
+app.get('*', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+initializeDatabase()
+  .then(() => {
+    app.listen(port, '0.0.0.0', () => {
+      console.log(`Busan Trip Wallet V8 running on port ${port}`);
+      console.log('Persistent storage: Railway PostgreSQL');
+    });
+  })
+  .catch((error) => {
+    console.error('Database initialization failed:', error);
+    process.exit(1);
+  });
+
+async function shutdown(signal) {
+  console.log(`${signal} received, closing database pool.`);
+  await pool.end().catch(() => {});
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
