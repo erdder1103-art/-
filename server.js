@@ -37,6 +37,8 @@ const upload = multer({
 
 const EMPTY_STATE = { expenses: [], members: [], packing: [], rate: 43, trip_departure: '', updated_at: null, version: 0 };
 const sessions = new Map();
+let weatherCache = { data: null, expires: 0 };
+setInterval(() => { const now = Date.now(); for (const [token, session] of sessions) if (session.expires < now) sessions.delete(token); }, 60 * 60 * 1000).unref();
 
 app.disable('x-powered-by');
 app.use(express.json({ limit: '3mb' }));
@@ -101,17 +103,46 @@ async function readState(client = pool) {
   return { ...normalizeState(row.payload || {}), version: Number(row.version || 0), updated_at: row.updated_at ? new Date(row.updated_at).toISOString() : null };
 }
 
+function mergeById(current, incoming, deletedIds = []) {
+  const deleted = new Set((Array.isArray(deletedIds) ? deletedIds : []).map(String));
+  const map = new Map((Array.isArray(current) ? current : []).map(item => [String(item.id), item]));
+  for (const item of (Array.isArray(incoming) ? incoming : [])) {
+    if (!item || !item.id || deleted.has(String(item.id))) continue;
+    map.set(String(item.id), { ...(map.get(String(item.id)) || {}), ...item });
+  }
+  for (const id of deleted) map.delete(id);
+  return [...map.values()];
+}
+
 async function writeState(input) {
-  const safe = normalizeState(input || {});
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const current = await client.query('SELECT version FROM app_state WHERE id = 1 FOR UPDATE');
-    const nextVersion = Number(current.rows[0]?.version || 0) + 1;
-    const result = await client.query(`UPDATE app_state SET payload=$1::jsonb, version=$2, updated_at=NOW() WHERE id=1 RETURNING payload,version,updated_at`, [JSON.stringify(safe), nextVersion]);
-    const memberIds = safe.members.map(m => String(m.id));
-    await client.query('DELETE FROM travel_documents WHERE NOT (member_id = ANY($1::text[]))', [memberIds]);
-    await client.query('DELETE FROM travel_folders WHERE NOT (member_id = ANY($1::text[]))', [memberIds]);
+    const locked = await client.query('SELECT payload, version FROM app_state WHERE id = 1 FOR UPDATE');
+    const currentSafe = normalizeState(locked.rows[0]?.payload || {});
+    const incoming = normalizeState(input || {});
+    const deleted = input?._deleted || {};
+    const mergedMembers = mergeById(currentSafe.members, incoming.members, deleted.members);
+    const validMemberIds = new Set(mergedMembers.map(m => String(m.id)));
+    const mergedExpenses = mergeById(currentSafe.expenses, incoming.expenses, deleted.expenses).filter(x => validMemberIds.has(String(x.member_id || '')));
+    const mergedPacking = mergeById(currentSafe.packing, incoming.packing, deleted.packing).filter(x => validMemberIds.has(String(x.member_id || '')));
+    const merged = normalizeState({
+      members: mergedMembers,
+      expenses: mergedExpenses,
+      packing: mergedPacking,
+      rate: Number(input?.rate) > 0 ? Number(input.rate) : currentSafe.rate,
+      trip_departure: typeof input?.trip_departure === 'string' ? input.trip_departure : currentSafe.trip_departure
+    });
+    const nextVersion = Number(locked.rows[0]?.version || 0) + 1;
+    const result = await client.query(`UPDATE app_state SET payload=$1::jsonb, version=$2, updated_at=NOW() WHERE id=1 RETURNING payload,version,updated_at`, [JSON.stringify(merged), nextVersion]);
+    const memberIds = merged.members.map(m => String(m.id));
+    if (memberIds.length) {
+      await client.query('DELETE FROM travel_documents WHERE NOT (member_id = ANY($1::text[]))', [memberIds]);
+      await client.query('DELETE FROM travel_folders WHERE NOT (member_id = ANY($1::text[]))', [memberIds]);
+    } else {
+      await client.query('DELETE FROM travel_documents');
+      await client.query('DELETE FROM travel_folders');
+    }
     await client.query('COMMIT');
     const row = result.rows[0];
     return { ...normalizeState(row.payload), version: Number(row.version), updated_at: new Date(row.updated_at).toISOString() };
@@ -164,8 +195,34 @@ app.get('/api/health', async (_req, res) => {
   try {
     const state = await readState();
     res.set('Cache-Control', 'no-store');
-    res.json({ ok: true, version: '8.6.0', storage: 'postgresql', persistent_storage: true, documents: true, members: state.members.length, expenses: state.expenses.length, state_version: state.version, updated_at: state.updated_at });
+    res.json({ ok: true, version: '8.7.0', storage: 'postgresql', persistent_storage: true, documents: true, members: state.members.length, expenses: state.expenses.length, state_version: state.version, updated_at: state.updated_at });
   } catch (error) { console.error(error); res.status(500).json({ ok: false, error: 'database_unavailable' }); }
+});
+
+
+app.get('/api/weather', async (req, res) => {
+  try {
+    const force = req.query.refresh === '1';
+    if (!force && weatherCache.data && weatherCache.expires > Date.now()) {
+      res.set('Cache-Control', 'no-store');
+      return res.json({ ...weatherCache.data, cached: true });
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    const url = 'https://api.open-meteo.com/v1/forecast?latitude=35.1796&longitude=129.0756&current=temperature_2m,apparent_temperature,relative_humidity_2m,is_day,weather_code,wind_speed_10m&hourly=temperature_2m,precipitation_probability,weather_code,is_day&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=Asia%2FSeoul&forecast_days=7';
+    let response;
+    try { response = await fetch(url, { signal: controller.signal, headers: { 'User-Agent': 'BusanTripWallet/8.7.0' } }); } finally { clearTimeout(timeout); }
+    if (!response.ok) throw new Error(`weather_http_${response.status}`);
+    const data = await response.json();
+    if (!data?.current || !Array.isArray(data?.hourly?.time) || !Array.isArray(data?.daily?.time)) throw new Error('weather_invalid_payload');
+    weatherCache = { data, expires: Date.now() + 5 * 60 * 1000 };
+    res.set('Cache-Control', 'no-store');
+    res.json({ ...data, cached: false });
+  } catch (error) {
+    console.error('Weather proxy failed:', error.message);
+    if (weatherCache.data) return res.status(200).json({ ...weatherCache.data, cached: true, stale: true });
+    res.status(502).json({ error: 'weather_unavailable' });
+  }
 });
 
 app.get('/api/state', async (_req, res) => {
@@ -271,7 +328,7 @@ app.use((error, _req, res, _next) => {
 
 app.get('*', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
-initializeDatabase().then(() => app.listen(port, '0.0.0.0', () => console.log(`Busan Trip Wallet V8.3 running on port ${port}`))).catch(error => { console.error('Database initialization failed:', error); process.exit(1); });
+initializeDatabase().then(() => app.listen(port, '0.0.0.0', () => console.log(`Busan Trip Wallet V8.7.0 running on port ${port}`))).catch(error => { console.error('Database initialization failed:', error); process.exit(1); });
 async function shutdown(signal) { console.log(`${signal} received`); await pool.end().catch(() => {}); process.exit(0); }
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
