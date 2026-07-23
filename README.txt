@@ -1,3 +1,3 @@
-Busan Trip Wallet V8.8.0
+Busan Trip Wallet V8.8.1
 
 動態天氣主題、手機/桌面響應式配色、交通標籤換行、文件資料夾排版，以及單次 PIN 共用解鎖修正版。

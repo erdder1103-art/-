@@ -1,6 +1,6 @@
 {
   "name": "busan-trip-wallet-v8-8-0",
-  "version": "8.8.0",
+  "version": "8.8.1",
   "private": true,
   "scripts": {
     "start": "node server.js"
