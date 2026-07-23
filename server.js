@@ -35,7 +35,7 @@ const upload = multer({
   }
 });
 
-const EMPTY_STATE = { expenses: [], members: [], packing: [], rate: 43, updated_at: null, version: 0 };
+const EMPTY_STATE = { expenses: [], members: [], packing: [], rate: 43, trip_departure: '', updated_at: null, version: 0 };
 const sessions = new Map();
 
 app.disable('x-powered-by');
@@ -56,14 +56,15 @@ function normalizeState(input) {
   const packing = Array.isArray(input?.packing)
     ? input.packing.filter((item) => item && memberIds.has(String(item.member_id || ''))).slice(0, 20000)
     : [];
-  return { members, expenses, packing, rate: Number(input?.rate) > 0 ? Number(input.rate) : 43 };
+  const trip_departure = typeof input?.trip_departure === 'string' ? input.trip_departure.slice(0, 40) : '';
+  return { members, expenses, packing, rate: Number(input?.rate) > 0 ? Number(input.rate) : 43, trip_departure };
 }
 
 async function initializeDatabase() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS app_state (
       id SMALLINT PRIMARY KEY CHECK (id = 1),
-      payload JSONB NOT NULL DEFAULT '{"expenses":[],"members":[],"packing":[],"rate":43}'::jsonb,
+      payload JSONB NOT NULL DEFAULT '{"expenses":[],"members":[],"packing":[],"rate":43,"trip_departure":""}'::jsonb,
       version BIGINT NOT NULL DEFAULT 0,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -90,7 +91,7 @@ async function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS idx_travel_documents_member ON travel_documents(member_id);
     CREATE INDEX IF NOT EXISTS idx_travel_documents_folder ON travel_documents(folder_id);
   `);
-  await pool.query(`INSERT INTO app_state (id, payload) VALUES (1, $1::jsonb) ON CONFLICT (id) DO NOTHING`, [JSON.stringify({ expenses: [], members: [], packing: [], rate: 43 })]);
+  await pool.query(`INSERT INTO app_state (id, payload) VALUES (1, $1::jsonb) ON CONFLICT (id) DO NOTHING`, [JSON.stringify({ expenses: [], members: [], packing: [], rate: 43, trip_departure: '' })]);
 }
 
 async function readState(client = pool) {
@@ -163,7 +164,7 @@ app.get('/api/health', async (_req, res) => {
   try {
     const state = await readState();
     res.set('Cache-Control', 'no-store');
-    res.json({ ok: true, version: '8.4.0', storage: 'postgresql', persistent_storage: true, documents: true, members: state.members.length, expenses: state.expenses.length, state_version: state.version, updated_at: state.updated_at });
+    res.json({ ok: true, version: '8.6.0', storage: 'postgresql', persistent_storage: true, documents: true, members: state.members.length, expenses: state.expenses.length, state_version: state.version, updated_at: state.updated_at });
   } catch (error) { console.error(error); res.status(500).json({ ok: false, error: 'database_unavailable' }); }
 });
 
