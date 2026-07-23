@@ -438,6 +438,20 @@ setTimeout(()=>{renderMembers();updateMemberAccess();renderExpenses()},0);
   const API = '/api/state';
   let loading = false;
   let saveTimer = null;
+  const unlockedMemberIds = new Set(JSON.parse(sessionStorage.getItem('busan_unlocked_members') || '[]'));
+  function rememberUnlocked(id) {
+    if (!id) return;
+    unlockedMemberIds.add(id);
+    sessionStorage.setItem('busan_unlocked_members', JSON.stringify([...unlockedMemberIds]));
+  }
+  function forgetUnlocked(id) {
+    unlockedMemberIds.delete(id);
+    sessionStorage.setItem('busan_unlocked_members', JSON.stringify([...unlockedMemberIds]));
+  }
+  function syncUnlockState() {
+    const member = selectedMember();
+    memberUnlocked = !member?.pin_hash || unlockedMemberIds.has(member.id);
+  }
 
   // Remove every developer/login/admin control from the user interface.
   $q('.cloudbar')?.remove();
@@ -542,7 +556,7 @@ setTimeout(()=>{renderMembers();updateMemberAccess();renderExpenses()},0);
         </div>`).join('') : '<div class="empty">還沒有成員，按上方新增自己。</div>';
     }
 
-    memberUnlocked = !selectedMember()?.pin_hash;
+    syncUnlockState();
     updateMemberAccess();
     renderExpenses();
   };
@@ -603,7 +617,7 @@ setTimeout(()=>{renderMembers();updateMemberAccess();renderExpenses()},0);
       members = Array.isArray(data.members) ? data.members : [];
       if ($q('#rate')) $q('#rate').value = Number(data.rate) || 43;
       activeMemberId = members.some(m => m.id === oldSelected) ? oldSelected : '';
-      memberUnlocked = !selectedMember()?.pin_hash;
+      syncUnlockState();
       renderMembers();
       const sync = $q('#syncTime');
       if (sync) sync.textContent = data.updated_at ? '已從伺服器同步' : '尚無共同記帳資料';
@@ -618,7 +632,7 @@ setTimeout(()=>{renderMembers();updateMemberAccess();renderExpenses()},0);
   if ($q('#activeMember')) {
     $q('#activeMember').onchange = () => {
       activeMemberId = $q('#activeMember').value;
-      memberUnlocked = !selectedMember()?.pin_hash;
+      syncUnlockState();
       updateMemberAccess();
       renderExpenses();
     };
@@ -630,6 +644,7 @@ setTimeout(()=>{renderMembers();updateMemberAccess();renderExpenses()},0);
       if (!member) return toast('請先選擇自己的名字');
       if (await hashPin($q('#unlockPin').value) !== member.pin_hash) return toast('密碼不正確');
       memberUnlocked = true;
+      rememberUnlocked(member.id);
       $q('#unlockPin').value = '';
       updateMemberAccess();
       toast('已解鎖');
@@ -647,6 +662,7 @@ setTimeout(()=>{renderMembers();updateMemberAccess();renderExpenses()},0);
       members.push({ id, name, pin_hash: await hashPin(pin) });
       activeMemberId = id;
       memberUnlocked = true;
+      rememberUnlocked(id);
       $q('#newMemberName').value = '';
       $q('#newMemberPin').value = '';
       renderMembers();
@@ -668,6 +684,7 @@ setTimeout(()=>{renderMembers();updateMemberAccess();renderExpenses()},0);
     members = members.filter(m => m.id !== id);
     expenses = expenses.filter(x => x.member_id !== id);
     if (activeMemberId === id) activeMemberId = '';
+    forgetUnlocked(id);
     renderMembers();
     await saveShared(false);
     toast('成員已刪除');
