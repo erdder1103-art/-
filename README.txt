@@ -1,52 +1,22 @@
-Busan Trip Wallet V8 - Railway PostgreSQL 版
-============================================
+Busan Trip Wallet V8.2
 
-這一版不使用 Volume，也不使用 state.json。
-所有成員、PIN、匯率與記帳資料都存在 Railway PostgreSQL。
-更新 GitHub 或重新部署 Railway，不會清除資料。
+更新內容
+1. 新增「旅遊文件」分頁。
+2. 每位旅行成員使用獨立文件空間。
+3. 支援成員 PIN 與管理 PIN 0723 解鎖。
+4. 支援自訂資料夾、圖片、QR Code 截圖與 PDF。
+5. 單檔上限 15MB；每位成員最多 200 個檔案、250MB。
+6. 文件與資料夾儲存在 PostgreSQL，重新部署不會消失。
+7. 附近推薦加入 GPS、半徑選擇與韓文多關鍵字 NAVER 搜尋。
+8. GPS 座標會暫存；瀏覽器已保存定位權限時不會重複詢問。
 
 部署方式
---------
-1. 將本資料夾內所有檔案上傳到 GitHub 儲存庫最外層：
-   - server.js
-   - package.json
-   - public/index.html
-   - .gitignore
+- 將整個專案上傳 GitHub，Railway 連接此儲存庫。
+- 保留原本 DATABASE_URL。
+- ADMIN_PIN 可自行設定；未設定時預設為 0723。
+- Railway 重新部署時會自動建立文件資料表，不需要手動執行 SQL。
 
-2. Railway 專案右上角按：
-   + Add -> Database -> PostgreSQL
-
-3. PostgreSQL 建立完成後，將它與目前網站服務放在同一個 Environment。
-   Railway 通常會自動把 DATABASE_URL 提供給網站服務。
-
-4. 點網站服務 -> Variables，確認存在：
-   DATABASE_URL=${{Postgres.DATABASE_URL}}
-
-   PostgreSQL 服務名稱若不是 Postgres，請用介面提供的 Reference Variable 選擇它，
-   不要手動複製公開網址。
-
-5. 在網站服務 Variables 新增：
-   ADMIN_PIN=0723
-
-6. 重新部署。啟動紀錄應顯示：
-   Busan Trip Wallet V8 running on port ...
-   Persistent storage: Railway PostgreSQL
-
-7. 開啟：
-   https://你的網址/api/health
-
-   正確結果包含：
-   "ok": true
-   "version": "8.0.0"
-   "storage": "postgresql"
-   "persistent_storage": true
-
-重要提醒
---------
-- 不用新增 Volume。
-- 不要刪除 Railway PostgreSQL 服務，否則資料庫也會被刪除。
-- ADMIN_PIN 可以在 Railway Variables 更換，不必修改 HTML。
-- 首次啟動會自動建立資料表，不需要執行 SQL。
-
-
-V8.1：附近推薦新增美食與景點分類、親子/推車/雨天標籤、NAVER 熱門搜尋入口。
+重要說明
+- PostgreSQL 適合旅途中備用的少量機票、訂房、QR Code 與 PDF。
+- 若未來要存放大量原始照片或影片，建議再升級 Cloudflare R2。
+- 支援格式：JPG、PNG、WEBP、GIF、PDF。

@@ -1,18 +1,12 @@
 {
-  "name": "busan-trip-wallet-v8",
-  "version": "8.1.0",
+  "name": "busan-trip-wallet-v8-2",
+  "version": "8.2.0",
   "private": true,
-  "description": "Busan family travel wallet with Railway PostgreSQL persistent storage",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js",
-    "check": "node --check server.js"
-  },
-  "engines": {
-    "node": ">=20"
-  },
+  "scripts": {"start": "node server.js"},
+  "engines": {"node": ">=18"},
   "dependencies": {
     "express": "^4.21.2",
-    "pg": "^8.13.3"
+    "multer": "^1.4.5-lts.1",
+    "pg": "^8.13.1"
   }
 }
