@@ -54,6 +54,35 @@ async function writeState(data) {
   return safe;
 }
 
+
+function normalizePin(value) {
+  return String(value ?? '').trim();
+}
+
+async function sha256(value) {
+  const crypto = require('crypto');
+  return crypto.createHash('sha256').update(String(value)).digest('hex');
+}
+
+app.post('/api/verify-pin', async (req, res) => {
+  try {
+    const memberId = String(req.body?.member_id || '');
+    const pin = normalizePin(req.body?.pin);
+    if (!memberId || !pin) return res.status(400).json({ ok: false });
+    const state = await readState();
+    const member = state.members.find(m => m.id === memberId);
+    if (!member) return res.status(404).json({ ok: false });
+    const adminPin = normalizePin(process.env.ADMIN_PIN || '0723');
+    const memberOk = member.pin_hash && (await sha256(pin)) === member.pin_hash;
+    const adminOk = pin === adminPin;
+    if (!memberOk && !adminOk) return res.status(401).json({ ok: false });
+    res.json({ ok: true, mode: adminOk ? 'admin' : 'member' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ ok: false });
+  }
+});
+
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 app.get('/api/state', async (_req, res) => {
   try {

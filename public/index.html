@@ -434,11 +434,13 @@ setTimeout(()=>{renderMembers();updateMemberAccess();renderExpenses()},0);
 
 <script id="shared-wallet-final-fix">
 (() => {
-  const $q = (s) => document.querySelector(s);
+  const $q = s => document.querySelector(s);
   const API = '/api/state';
+  const VERIFY_API = '/api/verify-pin';
   let loading = false;
   let saveTimer = null;
   const unlockedMemberIds = new Set(JSON.parse(sessionStorage.getItem('busan_unlocked_members') || '[]'));
+
   function rememberUnlocked(id) {
     if (!id) return;
     unlockedMemberIds.add(id);
@@ -448,286 +450,102 @@ setTimeout(()=>{renderMembers();updateMemberAccess();renderExpenses()},0);
     unlockedMemberIds.delete(id);
     sessionStorage.setItem('busan_unlocked_members', JSON.stringify([...unlockedMemberIds]));
   }
+  function selectedMember() { return members.find(m => m.id === activeMemberId) || null; }
   function syncUnlockState() {
-    const member = selectedMember();
-    memberUnlocked = !member?.pin_hash || unlockedMemberIds.has(member.id);
+    const m = selectedMember();
+    memberUnlocked = !!m && (!m.pin_hash || unlockedMemberIds.has(m.id));
+  }
+  async function verifyPin(memberId, pin) {
+    const r = await fetch(VERIFY_API, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({member_id: memberId, pin})
+    });
+    if (!r.ok) return false;
+    return !!(await r.json()).ok;
   }
 
-  // Remove every developer/login/admin control from the user interface.
   $q('.cloudbar')?.remove();
   $q('#cloudModal')?.remove();
   $q('#serverRequired')?.remove();
   $q('#memberPrivacy')?.remove();
   $q('#clearBtn')?.remove();
+  const title=$q('#memberPanel h2'); if(title) title.textContent='👥 旅行成員';
+  const note=$q('#memberPanel .privacy-note'); if(note) note.textContent='每個人都有自己的獨立帳本。選擇名字後，只會顯示該成員的個人總額與明細；有設定 PIN 的帳本必須解鎖。';
+  const manage=$q('#manageMembers'); if(manage) manage.textContent='新增／刪除成員';
+  const modalTitle=$q('#memberModal h2'); if(modalTitle) modalTitle.textContent='新增／刪除旅行成員';
+  const modalNote=$q('#memberModal .privacy-note'); if(modalNote) modalNote.textContent='每個人可設定自己的 4～8 位 PIN，也可以留空。';
+  const addMember=$q('#addMember'); if(addMember) addMember.textContent='＋ 新增自己';
+  const lockLabel=$q('#memberLock label'); if(lockLabel) lockLabel.textContent='此帳本已鎖定';
+  const lockInput=$q('#unlockPin'); if(lockInput) lockInput.placeholder='輸入自己的 PIN';
+  const lockBtn=$q('#unlockMember'); if(lockBtn) lockBtn.textContent='解鎖帳本';
 
-  const panelTitle = $q('#memberPanel h2');
-  if (panelTitle) panelTitle.textContent = '👥 旅行成員';
-  const panelNote = $q('#memberPanel .privacy-note');
-  if (panelNote) panelNote.textContent = '大家使用同一個網站，共用同一份記帳。選擇自己的名字；還沒有名字就按「新增／刪除成員」。密碼可設定，也可以留空。';
-  const manageButton = $q('#manageMembers');
-  if (manageButton) manageButton.textContent = '新增／刪除成員';
-  const modalTitle = $q('#memberModal h2');
-  if (modalTitle) modalTitle.textContent = '新增／刪除旅行成員';
-  const modalNote = $q('#memberModal .privacy-note');
-  if (modalNote) modalNote.textContent = '輸入自己的名字即可加入。密碼可留空；有設定密碼的人，刪除成員或記帳時需要驗證。';
-  const addMemberButton = $q('#addMember');
-  if (addMemberButton) addMemberButton.textContent = '＋ 新增自己';
+  try { currentUser={id:'shared-wallet'}; ownerMode=false; } catch(_) {}
 
-  // The shared website itself is the identity. No account login exists.
-  try { currentUser = { id: 'shared-wallet' }; } catch (_) {}
-  try { ownerMode = false; } catch (_) {}
-
-
-  async function getState() {
-    const response = await fetch(API, { cache: 'no-store' });
-    if (!response.ok) throw new Error('讀取失敗');
-    const data = await response.json();
-    return {
-      expenses: Array.isArray(data.expenses) ? data.expenses : [],
-      members: Array.isArray(data.members) ? data.members : [],
-      rate: Number(data.rate) || 43,
-      updated_at: data.updated_at || null
-    };
+  async function getState(){
+    const r=await fetch(API,{cache:'no-store'}); if(!r.ok) throw new Error('read');
+    return r.json();
   }
-
-  async function putState() {
-    const data = {
-      expenses: Array.isArray(expenses) ? expenses : [],
-      members: Array.isArray(members) ? members : [],
-      rate: Number($q('#rate')?.value) || 43,
-      updated_at: new Date().toISOString()
-    };
-    const response = await fetch(API, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data)
-    });
-    if (!response.ok) throw new Error('儲存失敗');
-    return response.json();
+  async function putState(){
+    const r=await fetch(API,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({expenses,members,rate:Number($q('#rate')?.value)||43})});
+    if(!r.ok) throw new Error('save'); return r.json();
   }
-
-  function selectedMember() {
-    return members.find(m => m.id === activeMemberId) || null;
+  function setTotalsHidden(message='請先選擇成員'){
+    $q('#krwTotal').textContent='—';
+    $q('#twdDirect').textContent='—';
+    $q('#twdTotal').textContent='—';
+    const box=$q('#expenseList'); if(box) box.innerHTML=`<div class="empty">${message}</div>`;
   }
-
-  window.visibleExpenses = () => expenses;
-
-  window.updateMemberAccess = function () {
-    const member = selectedMember();
-    const locked = !!member?.pin_hash && !memberUnlocked;
-    $q('#memberLock')?.classList.toggle('hidden', !locked);
-    $q('#addExpensePanel')?.classList.toggle('hidden', !member || locked);
-    const select = $q('#expenseMember');
-    if (select && member) select.value = member.id;
+  window.visibleExpenses=()=>{
+    const m=selectedMember();
+    if(!m || (m.pin_hash&&!memberUnlocked)) return [];
+    return expenses.filter(x=>x.member_id===m.id);
   };
-
-  window.renderMembers = function () {
-    const select = $q('#activeMember');
-    const payer = $q('#expenseMember');
-    const previous = activeMemberId;
-
-    if (select) {
-      select.innerHTML = members.length
-        ? '<option value="">選擇自己的名字</option>' + members.map(m => `<option value="${m.id}">${esc(m.name)}${m.pin_hash ? ' 🔒' : ''}</option>`).join('')
-        : '<option value="">尚未新增成員</option>';
-    }
-
-    if (members.some(m => m.id === previous)) activeMemberId = previous;
-    else activeMemberId = '';
-
-    if (select) select.value = activeMemberId;
-    if (payer) {
-      payer.innerHTML = members.map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('');
-      payer.value = activeMemberId || '';
-      const field = payer.closest('.field');
-      if (field) field.style.display = 'none';
-    }
-
-    const list = $q('#memberList');
-    if (list) {
-      list.innerHTML = members.length ? members.map(m => `
-        <div class="member-row">
-          <div class="ico">${m.pin_hash ? '🔒' : '👤'}</div>
-          <div class="main">
-            <div class="title">${esc(m.name)}</div>
-            <div class="sub">${m.pin_hash ? '有密碼保護' : '沒有設定密碼'}</div>
-          </div>
-          <button class="danger" onclick="deleteMember('${m.id}')">刪除</button>
-        </div>`).join('') : '<div class="empty">還沒有成員，按上方新增自己。</div>';
-    }
-
-    syncUnlockState();
-    updateMemberAccess();
-    renderExpenses();
+  window.updateMemberAccess=function(){
+    const m=selectedMember();
+    const locked=!!m?.pin_hash&&!memberUnlocked;
+    $q('#memberLock')?.classList.toggle('hidden',!locked);
+    $q('#addExpensePanel')?.classList.toggle('hidden',!m||locked);
+    const payer=$q('#expenseMember'); if(payer&&m) payer.value=m.id;
   };
-
-  window.renderExpenses = function () {
-    const rate = Number($q('#rate')?.value) || 43;
-    let krw = 0, twd = 0;
-    expenses.forEach(x => x.currency === 'KRW' ? krw += Number(x.amount) : twd += Number(x.amount));
-    $q('#krwTotal').textContent = '₩' + fmt(krw);
-    $q('#twdDirect').textContent = 'NT$' + fmt(twd);
-    $q('#twdTotal').textContent = 'NT$' + fmt(twd + krw / rate);
-
-    const box = $q('#expenseList');
-    if (!box) return;
-    if (!members.length) {
-      box.innerHTML = '<div class="empty">先按「新增／刪除成員」加入自己的名字。</div>';
-      return;
-    }
-    if (!expenses.length) {
-      box.innerHTML = '<div class="empty">目前還沒有記帳，選擇自己的名字後新增第一筆吧！</div>';
-      return;
-    }
-    box.innerHTML = [...expenses].reverse().map(x => {
-      const index = expenses.findIndex(e => e.id === x.id);
-      const member = members.find(m => m.id === x.member_id);
-      return `<div class="item"><div class="ico">${icons[x.category] || '✨'}</div><div class="main"><div class="title">${esc(x.name)}</div><div class="sub">${x.date} · ${x.category} · ${esc(member?.name || '未指定')}</div></div><div class="amt">${x.currency === 'KRW' ? '₩' : 'NT$'}${fmt(x.amount)}<small>${x.currency === 'KRW' ? '約 NT$' + fmt(x.amount / rate) : ''}</small></div><button class="del" onclick="removeExpense(${index})">×</button></div>`;
-    }).join('');
+  window.renderMembers=function(){
+    const sel=$q('#activeMember'), payer=$q('#expenseMember');
+    const prev=activeMemberId;
+    if(sel) sel.innerHTML=members.length?'<option value="">選擇自己的名字</option>'+members.map(m=>`<option value="${m.id}">${esc(m.name)}${m.pin_hash?' 🔒':''}</option>`).join(''):'<option value="">尚未新增成員</option>';
+    activeMemberId=members.some(m=>m.id===prev)?prev:'';
+    if(sel) sel.value=activeMemberId;
+    if(payer){payer.innerHTML=members.map(m=>`<option value="${m.id}">${esc(m.name)}</option>`).join('');payer.value=activeMemberId||'';const f=payer.closest('.field');if(f)f.style.display='none';}
+    const list=$q('#memberList');
+    if(list) list.innerHTML=members.length?members.map(m=>`<div class="member-row"><div class="ico">${m.pin_hash?'🔒':'👤'}</div><div class="main"><div class="title">${esc(m.name)}</div><div class="sub">${m.pin_hash?'私人帳本（PIN 保護）':'公開帳本（未設 PIN）'}</div></div><button class="danger" onclick="deleteMember('${m.id}')">刪除</button></div>`).join(''):'<div class="empty">還沒有成員，按上方新增自己。</div>';
+    syncUnlockState(); updateMemberAccess(); renderExpenses();
   };
-
-  async function saveShared(showMessage = false) {
-    try {
-      const result = await putState();
-      const sync = $q('#syncTime');
-      if (sync) sync.textContent = '已自動儲存 ' + new Date(result.updated_at || Date.now()).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
-      if (showMessage) toast('記帳完成');
-    } catch (_) {
-      toast('伺服器儲存失敗，請稍後再試');
-    }
-  }
-
-  window.queueCloudSync = function () {
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => saveShared(false), 350);
+  window.renderExpenses=function(){
+    const m=selectedMember();
+    if(!m) return setTotalsHidden('請先選擇自己的名字。');
+    if(m.pin_hash&&!memberUnlocked) return setTotalsHidden('🔒 此帳本已鎖定，輸入 PIN 後才能查看個人總額與明細。');
+    const rows=expenses.filter(x=>x.member_id===m.id);
+    const rate=Number($q('#rate')?.value)||43;
+    let krw=0,twd=0; rows.forEach(x=>x.currency==='KRW'?krw+=Number(x.amount):twd+=Number(x.amount));
+    $q('#krwTotal').textContent='₩'+fmt(krw);
+    $q('#twdDirect').textContent='NT$'+fmt(twd);
+    $q('#twdTotal').textContent='NT$'+fmt(twd+krw/rate);
+    const box=$q('#expenseList'); if(!box)return;
+    if(!rows.length){box.innerHTML=`<div class="empty">${esc(m.name)}目前還沒有記帳。</div>`;return;}
+    box.innerHTML=[...rows].reverse().map(x=>{const idx=expenses.findIndex(e=>e.id===x.id);return `<div class="item"><div class="ico">${icons[x.category]||'✨'}</div><div class="main"><div class="title">${esc(x.name)}</div><div class="sub">${x.date} · ${x.category}</div></div><div class="amt">${x.currency==='KRW'?'₩':'NT$'}${fmt(x.amount)}<small>${x.currency==='KRW'?'約 NT$'+fmt(x.amount/rate):''}</small></div><button class="del" onclick="removeExpense(${idx})">×</button></div>`}).join('');
   };
-  window.saveLocal = function () {
-    renderExpenses();
-    queueCloudSync();
-  };
-  window.pushCloud = saveShared;
+  async function saveShared(show=false){try{const r=await putState();const sync=$q('#syncTime');if(sync)sync.textContent='已自動儲存 '+new Date(r.updated_at||Date.now()).toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'});if(show)toast('記帳完成');}catch(_){toast('伺服器儲存失敗，請稍後再試');}}
+  window.queueCloudSync=function(){clearTimeout(saveTimer);saveTimer=setTimeout(()=>saveShared(false),350)};
+  window.saveLocal=function(){renderExpenses();queueCloudSync()};
+  window.pushCloud=saveShared;
+  window.pullCloud=async function(){if(loading)return;loading=true;try{const d=await getState();const old=activeMemberId;expenses=Array.isArray(d.expenses)?d.expenses:[];members=Array.isArray(d.members)?d.members:[];if($q('#rate'))$q('#rate').value=Number(d.rate)||43;activeMemberId=members.some(m=>m.id===old)?old:'';syncUnlockState();renderMembers();const sync=$q('#syncTime');if(sync)sync.textContent=d.updated_at?'已從伺服器同步':'尚無共同記帳資料';}catch(_){const sync=$q('#syncTime');if(sync)sync.textContent='伺服器連線失敗';}finally{loading=false;}};
 
-  window.pullCloud = async function () {
-    if (loading) return;
-    loading = true;
-    try {
-      const data = await getState();
-      const oldSelected = activeMemberId;
-      expenses = Array.isArray(data.expenses) ? data.expenses : [];
-      members = Array.isArray(data.members) ? data.members : [];
-      if ($q('#rate')) $q('#rate').value = Number(data.rate) || 43;
-      activeMemberId = members.some(m => m.id === oldSelected) ? oldSelected : '';
-      syncUnlockState();
-      renderMembers();
-      const sync = $q('#syncTime');
-      if (sync) sync.textContent = data.updated_at ? '已從伺服器同步' : '尚無共同記帳資料';
-    } catch (_) {
-      const sync = $q('#syncTime');
-      if (sync) sync.textContent = '伺服器連線失敗';
-    } finally {
-      loading = false;
-    }
-  };
-
-  if ($q('#activeMember')) {
-    $q('#activeMember').onchange = () => {
-      activeMemberId = $q('#activeMember').value;
-      syncUnlockState();
-      updateMemberAccess();
-      renderExpenses();
-    };
-  }
-
-  if ($q('#unlockMember')) {
-    $q('#unlockMember').onclick = async () => {
-      const member = selectedMember();
-      if (!member) return toast('請先選擇自己的名字');
-      if (await hashPin($q('#unlockPin').value) !== member.pin_hash) return toast('密碼不正確');
-      memberUnlocked = true;
-      rememberUnlocked(member.id);
-      $q('#unlockPin').value = '';
-      updateMemberAccess();
-      toast('已解鎖');
-    };
-  }
-
-  if ($q('#addMember')) {
-    $q('#addMember').onclick = async () => {
-      const name = $q('#newMemberName').value.trim();
-      const pin = $q('#newMemberPin').value.trim();
-      if (!name) return toast('請輸入你的名字');
-      if (members.some(m => m.name.toLowerCase() === name.toLowerCase())) return toast('這個名字已經存在');
-      if (pin && !/^\d{4,8}$/.test(pin)) return toast('密碼請使用 4～8 位數字');
-      const id = crypto.randomUUID();
-      members.push({ id, name, pin_hash: await hashPin(pin) });
-      activeMemberId = id;
-      memberUnlocked = true;
-      rememberUnlocked(id);
-      $q('#newMemberName').value = '';
-      $q('#newMemberPin').value = '';
-      renderMembers();
-      await saveShared(false);
-      $q('#memberModal')?.classList.remove('show');
-      toast('已新增 ' + name);
-    };
-  }
-
-  window.deleteMember = async function (id) {
-    const member = members.find(m => m.id === id);
-    if (!member) return;
-    if (member.pin_hash) {
-      const pin = prompt(`請輸入「${member.name}」的密碼才能刪除`);
-      if (pin === null) return;
-      if (await hashPin(pin) !== member.pin_hash) return toast('密碼不正確');
-    }
-    if (!confirm(`確定刪除「${member.name}」以及他的所有記帳？`)) return;
-    members = members.filter(m => m.id !== id);
-    expenses = expenses.filter(x => x.member_id !== id);
-    if (activeMemberId === id) activeMemberId = '';
-    forgetUnlocked(id);
-    renderMembers();
-    await saveShared(false);
-    toast('成員已刪除');
-  };
-
-  if ($q('#addBtn')) {
-    $q('#addBtn').onclick = async () => {
-      const member = selectedMember();
-      if (!member) return toast('請先選擇自己的名字');
-      if (member.pin_hash && !memberUnlocked) return toast('請先輸入自己的密碼');
-      const name = $q('#name').value.trim();
-      const amount = Number($q('#amount').value);
-      if (!name || amount <= 0) return toast('請輸入項目與正確金額');
-      expenses.push({
-        id: crypto.randomUUID(), member_id: member.id, name, amount,
-        currency: $q('#currency').value, category: $q('#category').value,
-        date: $q('#date').value, created_at: new Date().toISOString()
-      });
-      $q('#name').value = '';
-      $q('#amount').value = '';
-      renderExpenses();
-      await saveShared(true);
-    };
-  }
-
-  window.removeExpense = async function (index) {
-    const expense = expenses[index];
-    if (!expense) return;
-    const member = members.find(m => m.id === expense.member_id);
-    if (member?.pin_hash) {
-      const pin = prompt(`請輸入「${member.name}」的密碼才能刪除這筆記帳`);
-      if (pin === null) return;
-      if (await hashPin(pin) !== member.pin_hash) return toast('密碼不正確');
-    }
-    if (!confirm('確定刪除這筆記帳？')) return;
-    expenses.splice(index, 1);
-    renderExpenses();
-    await saveShared(false);
-  };
-
-  $q('#rate')?.addEventListener('change', () => saveShared(false));
-  pullCloud();
-  setInterval(() => { if (!document.hidden) pullCloud(); }, 5000);
+  if($q('#activeMember')) $q('#activeMember').onchange=()=>{activeMemberId=$q('#activeMember').value;syncUnlockState();updateMemberAccess();renderExpenses();};
+  if($q('#unlockMember')) $q('#unlockMember').onclick=async()=>{const m=selectedMember();if(!m)return toast('請先選擇名字');const pin=$q('#unlockPin').value.trim();if(!pin)return toast('請輸入 PIN');if(!await verifyPin(m.id,pin))return toast('密碼不正確');memberUnlocked=true;rememberUnlocked(m.id);$q('#unlockPin').value='';updateMemberAccess();renderExpenses();toast('已解鎖');};
+  if($q('#addMember')) $q('#addMember').onclick=async()=>{const name=$q('#newMemberName').value.trim(),pin=$q('#newMemberPin').value.trim();if(!name)return toast('請輸入你的名字');if(members.some(m=>m.name.toLowerCase()===name.toLowerCase()))return toast('這個名字已存在');if(pin&&!/^\d{4,8}$/.test(pin))return toast('PIN 請使用 4～8 位數字');const id=crypto.randomUUID();members.push({id,name,pin_hash:await hashPin(pin)});activeMemberId=id;memberUnlocked=true;rememberUnlocked(id);$q('#newMemberName').value='';$q('#newMemberPin').value='';renderMembers();await saveShared(false);$q('#memberModal')?.classList.remove('show');toast('已新增 '+name);};
+  window.deleteMember=async id=>{const m=members.find(x=>x.id===id);if(!m)return;if(m.pin_hash){const pin=prompt(`請輸入「${m.name}」的 PIN`);if(pin===null)return;if(!await verifyPin(m.id,pin))return toast('密碼不正確');}if(!confirm(`確定刪除「${m.name}」以及他的所有記帳？`))return;members=members.filter(x=>x.id!==id);expenses=expenses.filter(x=>x.member_id!==id);if(activeMemberId===id)activeMemberId='';forgetUnlocked(id);renderMembers();await saveShared(false);toast('成員已刪除');};
+  if($q('#addBtn')) $q('#addBtn').onclick=async()=>{const m=selectedMember();if(!m)return toast('請先選擇自己的名字');if(m.pin_hash&&!memberUnlocked)return toast('請先解鎖帳本');const name=$q('#name').value.trim(),amount=Number($q('#amount').value);if(!name||amount<=0)return toast('請輸入項目與正確金額');expenses.push({id:crypto.randomUUID(),member_id:m.id,name,amount,currency:$q('#currency').value,category:$q('#category').value,date:$q('#date').value,created_at:new Date().toISOString()});$q('#name').value='';$q('#amount').value='';renderExpenses();await saveShared(true);};
+  window.removeExpense=async idx=>{const e=expenses[idx];if(!e)return;const m=members.find(x=>x.id===e.member_id);if(m?.pin_hash&&!unlockedMemberIds.has(m.id)){const pin=prompt(`請輸入「${m.name}」的 PIN`);if(pin===null)return;if(!await verifyPin(m.id,pin))return toast('密碼不正確');rememberUnlocked(m.id);}if(!confirm('確定刪除這筆記帳？'))return;expenses.splice(idx,1);renderExpenses();await saveShared(false);};
+  $q('#rate')?.addEventListener('change',()=>{renderExpenses();saveShared(false)});
+  pullCloud(); setInterval(()=>{if(!document.hidden)pullCloud()},5000);
 })();
 </script>
 
