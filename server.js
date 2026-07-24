@@ -195,7 +195,7 @@ app.get('/api/health', async (_req, res) => {
   try {
     const state = await readState();
     res.set('Cache-Control', 'no-store');
-    res.json({ ok: true, version: '8.8.1', storage: 'postgresql', persistent_storage: true, documents: true, members: state.members.length, expenses: state.expenses.length, state_version: state.version, updated_at: state.updated_at });
+    res.json({ ok: true, version: '8.8.2', storage: 'postgresql', persistent_storage: true, documents: true, members: state.members.length, expenses: state.expenses.length, state_version: state.version, updated_at: state.updated_at });
   } catch (error) { console.error(error); res.status(500).json({ ok: false, error: 'database_unavailable' }); }
 });
 
@@ -211,7 +211,7 @@ app.get('/api/weather', async (req, res) => {
     const timeout = setTimeout(() => controller.abort(), 10000);
     const url = 'https://api.open-meteo.com/v1/forecast?latitude=35.1796&longitude=129.0756&current=temperature_2m,apparent_temperature,relative_humidity_2m,is_day,weather_code,wind_speed_10m&hourly=temperature_2m,precipitation_probability,weather_code,is_day&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=Asia%2FSeoul&forecast_days=7';
     let response;
-    try { response = await fetch(url, { signal: controller.signal, headers: { 'User-Agent': 'BusanTripWallet/8.8.1' } }); } finally { clearTimeout(timeout); }
+    try { response = await fetch(url, { signal: controller.signal, headers: { 'User-Agent': 'BusanTripWallet/8.8.2' } }); } finally { clearTimeout(timeout); }
     if (!response.ok) throw new Error(`weather_http_${response.status}`);
     const data = await response.json();
     if (!data?.current || !Array.isArray(data?.hourly?.time) || !Array.isArray(data?.daily?.time)) throw new Error('weather_invalid_payload');
